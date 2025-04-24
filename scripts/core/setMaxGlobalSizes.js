@@ -6,23 +6,27 @@ const network = (process.env.HARDHAT_NETWORK || 'mainnet');
 const tokens = require('./tokens')[network];
 
 async function getArbValues() {
-  const positionRouter = await contractAt("PositionRouter", "0x3D6bA331e3D9702C5e8A8d254e5d8a285F223aba")
-  const positionManager = await contractAt("PositionManager", "0x87a4088Bd721F83b6c2E5102e2FA47022Cb1c831")
+  const positionContracts = [
+    "0xb87a436B93fFE9D75c5cFA7bAcFff96430b09868", // PositionRouter
+    "0x75E42e6f01baf1D6022bEa862A28774a9f8a4A0C" // PositionManager
+  ]
 
   const { btc, eth, link, uni } = tokens
-  const tokenArr = [link]
+  const tokenArr = [btc, eth, link, uni]
 
-  return { positionRouter, positionManager, tokenArr }
+  return { positionContracts, tokenArr }
 }
 
 async function getAvaxValues() {
-  const positionRouter = await contractAt("PositionRouter", "0x195256074192170d1530527abC9943759c7167d8")
-  const positionManager = await contractAt("PositionManager", "0xF2ec2e52c3b5F8b8bd5A3f93945d05628A233216")
+  const positionContracts = [
+    "0xffF6D276Bc37c61A23f06410Dce4A400f66420f8", // PositionRouter
+    "0xA21B83E579f4315951bA658654c371520BDcB866" // PositionManager
+  ]
 
-  const { avax, eth, btc } = tokens
-  const tokenArr = [avax]
+  const { avax, eth, btc, btcb } = tokens
+  const tokenArr = [avax, eth, btc, btcb]
 
-  return { positionRouter, positionManager, tokenArr }
+  return { positionContracts, tokenArr }
 }
 
 async function getValues() {
@@ -35,9 +39,8 @@ async function getValues() {
   }
 }
 
-
 async function main() {
-  const { positionRouter, positionManager, tokenArr } = await getValues()
+  const { positionContracts, tokenArr } = await getValues()
 
   const tokenAddresses = tokenArr.map(t => t.address)
   const longSizes = tokenArr.map((token) => {
@@ -56,8 +59,10 @@ async function main() {
     return expandDecimals(token.maxGlobalShortSize, 30)
   })
 
-  await sendTxn(positionRouter.setMaxGlobalSizes(tokenAddresses, longSizes, shortSizes), "positionRouter.setMaxGlobalSizes")
-  await sendTxn(positionManager.setMaxGlobalSizes(tokenAddresses, longSizes, shortSizes), "positionManager.setMaxGlobalSizes")
+  for (let i = 0; i < positionContracts.length; i++) {
+    const positionContract = await contractAt("PositionManager", positionContracts[i])
+    await sendTxn(positionContract.setMaxGlobalSizes(tokenAddresses, longSizes, shortSizes), "positionContract.setMaxGlobalSizes")
+  }
 }
 
 main()
