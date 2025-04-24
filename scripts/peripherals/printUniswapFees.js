@@ -1,9 +1,20 @@
+const fs = require('fs')
+
 const { contractAt } = require("../shared/helpers")
 const { expandDecimals, bigNumberify } = require("../../test/shared/utilities")
 const { Token } = require('@uniswap/sdk-core')
 const { tickToPrice, Pool, Position } = require('@uniswap/v3-sdk')
 
+const uniswapFeeReference = require("../../uniswap-fee-reference.json")
+
 const UniNftManager = require("../../artifacts/contracts/amm/UniNftManager.sol/UniNftManager.json")
+
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
+const MILLISECONDS_PER_WEEK = 7 * MILLISECONDS_PER_DAY
+
+function roundToNearestWeek(timestamp, dayOffset) {
+  return parseInt(timestamp / MILLISECONDS_PER_WEEK) * MILLISECONDS_PER_WEEK + dayOffset * MILLISECONDS_PER_DAY
+}
 
 async function main() {
   const MAX_UINT128 = bigNumberify(2).pow(128).sub(1)
@@ -25,31 +36,10 @@ async function main() {
     []
   )
 
-  const nftIds = [
-    566,
-    16,
-    17,
-    18,
-    19,
-    20,
-    21,
-    22,
-    23,
-    24,
-    25,
-    2726,
-    16797,
-    16809,
-    16810,
-    17079,
-    17080,
-    24729,
-    25035,
-    25921,
-    31374
-  ]
+  const nftIds = [33985, 566, 16, 17, 18, 19, 20, 21, 22, 2726, 16797, 16809, 16810, 17079, 17080, 24729, 25035, 25921, 31374, 69112, 69115, 69119, 69120, 34143, 1382528]
 
   console.log("NFT ID,Fees")
+  let totalETH = bigNumberify(0)
   for (let i = 0; i < nftIds.length; i++) {
     const nftId = nftIds[i]
     const owner = await nftManager.ownerOf(nftId)
@@ -66,8 +56,26 @@ async function main() {
     }
 
     const collectResult = await uniPositionManager.callStatic.collect(params, { from: owner })
-    console.log(`${nftId},${ethers.utils.formatUnits(collectResult.amount0, 18)}`)
+    console.log(`NFT_${nftId},${ethers.utils.formatUnits(collectResult.amount0, 18)}`)
+    totalETH = totalETH.add(collectResult.amount0)
   }
+
+  const refTimestamp = roundToNearestWeek(Date.now(), 6)
+  const delta = totalETH.sub(bigNumberify(uniswapFeeReference.totalETH))
+
+  if (uniswapFeeReference.refTimestamp > refTimestamp) {
+    totalETH = bigNumberify(uniswapFeeReference.totalETH)
+  }
+
+  const filename = `./uniswap-fee-reference.json`
+
+  const data = {
+    refTimestamp,
+    totalETH: totalETH.toString(),
+    delta: delta.toString()
+  }
+
+  fs.writeFileSync(filename, JSON.stringify(data, null, 4))
 }
 
 main()

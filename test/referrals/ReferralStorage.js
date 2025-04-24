@@ -21,16 +21,17 @@ describe("ReferralStorage", function () {
   beforeEach(async () => {
     referralStorage = await deployContract("ReferralStorage", []);
     timelock = await deployContract("Timelock", [
-      wallet.address,
-      5 * 24 * 60 * 60,
-      rewardManager.address,
-      tokenManager.address,
-      mintReceiver.address,
-      expandDecimals(1000, 18),
+      wallet.address, // _admin
+      5 * 24 * 60 * 60, // _buffer
+      tokenManager.address, // _tokenManager
+      mintReceiver.address, // _mintReceiver
+      user0.address, // _glpManager
+      user0.address, // _prevGlpManager
+      user1.address, // _rewardRouter
+      expandDecimals(1000, 18), // _maxTokenSupply
       50, // marginFeeBasisPoints 0.5%
       500, // maxMarginFeeBasisPoints 5%
     ])
-
   })
 
   it("Sets new handler", async () => {
@@ -192,7 +193,7 @@ describe("ReferralStorage", function () {
       .to.be.revertedWith("Governable: forbidden")
 
     await expect(timelock.connect(user0).setTier(referralStorage.address, 1, 12, 20))
-      .to.be.revertedWith("Timelock: forbidden")
+      .to.be.revertedWith("forbidden")
 
     await timelock.setContractHandler(user0.address, true)
 
@@ -214,7 +215,7 @@ describe("ReferralStorage", function () {
       .to.be.revertedWith("Governable: forbidden")
 
     await expect(timelock.connect(user0).setReferrerTier(referralStorage.address, user1.address, 2))
-      .to.be.revertedWith("Timelock: forbidden")
+      .to.be.revertedWith("forbidden")
 
     await timelock.setContractHandler(user0.address, true)
 
@@ -231,7 +232,7 @@ describe("ReferralStorage", function () {
       .to.be.revertedWith("Governable: forbidden")
 
     await expect(timelock.connect(user0).govSetCodeOwner(referralStorage.address, code, user1.address))
-      .to.be.revertedWith("Timelock: forbidden")
+      .to.be.revertedWith("forbidden")
 
     await timelock.setContractHandler(user0.address, true)
 
