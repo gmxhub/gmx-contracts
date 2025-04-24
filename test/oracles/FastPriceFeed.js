@@ -17,58 +17,97 @@ describe("FastPriceFeed", function () {
   const { AddressZero } = ethers.constants
   const depositFee = 50
   const minExecutionFee = 4000
+  const updateFee = "1000000000000"
 
   const [wallet, tokenManager, mintReceiver, user0, user1, user2, user3, signer0, signer1, updater0, updater1] = provider.getWallets()
+
+  let bnbFeedId = ethers.utils.keccak256("0x01")
+  let btcFeedId = ethers.utils.keccak256("0x02")
+  let ethFeedId = ethers.utils.keccak256("0x03")
+
+  let vaultPriceFeed
   let bnb
+  let bnbPriceFeed
   let btc
+  let btcPriceFeed
   let eth
+  let ethPriceFeed
+  let vault
+  let timelock
+  let usdg
+  let router
+  let positionUtils
   let fastPriceEvents
+  let mockPyth
   let fastPriceFeed
 
   beforeEach(async () => {
+    vaultPriceFeed = await deployContract("VaultPriceFeed", [])
+
     bnb = await deployContract("Token", [])
+    bnbPriceFeed = await deployContract("PriceFeed", [])
+
     btc = await deployContract("Token", [])
+    btcPriceFeed = await deployContract("PriceFeed", [])
+
     eth = await deployContract("Token", [])
+    ethPriceFeed = await deployContract("PriceFeed", [])
 
     vault = await deployContract("Vault", [])
     timelock = await deployContract("Timelock", [
-      wallet.address,
-      5 * 24 * 60 * 60,
-      AddressZero,
-      tokenManager.address,
-      mintReceiver.address,
-      expandDecimals(1000, 18),
+      wallet.address, // _admin
+      5 * 24 * 60 * 60, // _buffer
+      tokenManager.address, // _tokenManager
+      mintReceiver.address, // _mintReceiver
+      user0.address, // _glpManager
+      user0.address, // _prevGlpManager
+      user1.address, // _rewardRouter
+      expandDecimals(1000, 18), // _maxTokenSupply
       10, // marginFeeBasisPoints 0.1%
       500, // maxMarginFeeBasisPoints 5%
     ])
 
     usdg = await deployContract("USDG", [vault.address])
     router = await deployContract("Router", [vault.address, usdg.address, bnb.address])
-    positionRouter = await deployContract("PositionRouter", [vault.address, router.address, bnb.address, depositFee, minExecutionFee])
+    positionUtils = await deployContract("PositionUtils", [])
 
     fastPriceEvents = await deployContract("FastPriceEvents", [])
+    mockPyth = await deployContract("MockPyth", [])
     fastPriceFeed = await deployContract("FastPriceFeed", [
+      mockPyth.address, // _pyth
       5 * 60, // _priceDuration
+      120 * 60, // _maxPriceUpdateDelay
       2, // _minBlockInterval
       250, // _maxDeviationBasisPoints
+      vaultPriceFeed.address, // _vaultPriceFeed
       fastPriceEvents.address, // _fastPriceEvents
-      tokenManager.address, // _tokenManager
-      positionRouter.address // _positionRouter
+      tokenManager.address // _tokenManager
     ])
-    await fastPriceFeed.initialize(2, [signer0.address, signer1.address], [updater0.address, updater1.address])
+    await fastPriceFeed.initialize(
+      2,
+      [signer0.address, signer1.address],
+      [updater0.address, updater1.address],
+      [bnb.address, btc.address, eth.address],
+      [bnbFeedId, btcFeedId, ethFeedId]
+    )
+
     await fastPriceEvents.setIsPriceFeed(fastPriceFeed.address, true)
 
     await vault.setGov(timelock.address)
+
+    await vaultPriceFeed.setTokenConfig(bnb.address, bnbPriceFeed.address, 8, false)
+    await vaultPriceFeed.setTokenConfig(btc.address, btcPriceFeed.address, 8, false)
+    await vaultPriceFeed.setTokenConfig(eth.address, ethPriceFeed.address, 8, false)
   })
 
   it("inits", async () => {
     expect(await fastPriceFeed.gov()).eq(wallet.address)
     expect(await fastPriceFeed.priceDuration()).eq(5 * 60)
+    expect(await fastPriceFeed.maxPriceUpdateDelay()).eq(120 * 60)
     expect(await fastPriceFeed.minBlockInterval()).eq(2)
     expect(await fastPriceFeed.maxDeviationBasisPoints()).eq(250)
     expect(await fastPriceFeed.fastPriceEvents()).eq(fastPriceEvents.address)
     expect(await fastPriceFeed.tokenManager()).eq(tokenManager.address)
-    expect(await fastPriceFeed.positionRouter()).eq(positionRouter.address)
     expect(await fastPriceFeed.minAuthorizations()).eq(2)
     expect(await fastPriceFeed.isSigner(wallet.address)).eq(false)
     expect(await fastPriceFeed.isSigner(signer0.address)).eq(true)
@@ -78,19 +117,14 @@ describe("FastPriceFeed", function () {
     expect(await fastPriceFeed.isUpdater(updater0.address)).eq(true)
     expect(await fastPriceFeed.isUpdater(updater1.address)).eq(true)
 
-    await expect(fastPriceFeed.initialize(2, [signer0.address, signer1.address], [updater0.address, updater1.address]))
+    await expect(fastPriceFeed.initialize(
+      2,
+      [signer0.address, signer1.address],
+      [updater0.address, updater1.address],
+      [bnb.address, btc.address, eth.address],
+      [bnbFeedId, btcFeedId, ethFeedId]
+    ))
       .to.be.revertedWith("FastPriceFeed: already initialized")
-  })
-
-  it("setTokenManager", async () => {
-    await expect(fastPriceFeed.connect(user0).setTokenManager(user1.address))
-      .to.be.revertedWith("Governable: forbidden")
-
-    await fastPriceFeed.setGov(user0.address)
-
-    expect(await fastPriceFeed.tokenManager()).eq(tokenManager.address)
-    await fastPriceFeed.connect(user0).setTokenManager(user1.address)
-    expect(await fastPriceFeed.tokenManager()).eq(user1.address)
   })
 
   it("setSigner", async () => {
@@ -115,17 +149,6 @@ describe("FastPriceFeed", function () {
     expect(await fastPriceFeed.isUpdater(user1.address)).eq(true)
   })
 
-  it("setFastPriceEvents", async () => {
-    await expect(fastPriceFeed.connect(user0).setFastPriceEvents(user1.address))
-      .to.be.revertedWith("Governable: forbidden")
-
-    await fastPriceFeed.setGov(user0.address)
-
-    expect(await fastPriceFeed.fastPriceEvents()).eq(fastPriceEvents.address)
-    await fastPriceFeed.connect(user0).setFastPriceEvents(user1.address)
-    expect(await fastPriceFeed.fastPriceEvents()).eq(user1.address)
-  })
-
   it("setPriceDuration", async () => {
     await expect(fastPriceFeed.connect(user0).setPriceDuration(30 * 60))
       .to.be.revertedWith("Governable: forbidden")
@@ -138,6 +161,39 @@ describe("FastPriceFeed", function () {
     expect(await fastPriceFeed.priceDuration()).eq(5 * 60)
     await fastPriceFeed.connect(user0).setPriceDuration(30 * 60)
     expect(await fastPriceFeed.priceDuration()).eq(30 * 60)
+  })
+
+  it("setMaxPriceUpdateDelay", async () => {
+    await expect(fastPriceFeed.connect(user0).setMaxPriceUpdateDelay(50 * 60))
+      .to.be.revertedWith("Governable: forbidden")
+
+    await fastPriceFeed.setGov(user0.address)
+
+    expect(await fastPriceFeed.maxPriceUpdateDelay()).eq(2 * 60 * 60)
+    await fastPriceFeed.connect(user0).setMaxPriceUpdateDelay(50 * 60)
+    expect(await fastPriceFeed.maxPriceUpdateDelay()).eq(50 * 60)
+  })
+
+  it("setSpreadBasisPointsIfInactive", async () => {
+    await expect(fastPriceFeed.connect(user0).setSpreadBasisPointsIfInactive(30))
+      .to.be.revertedWith("Governable: forbidden")
+
+    await fastPriceFeed.setGov(user0.address)
+
+    expect(await fastPriceFeed.spreadBasisPointsIfInactive()).eq(0)
+    await fastPriceFeed.connect(user0).setSpreadBasisPointsIfInactive(30)
+    expect(await fastPriceFeed.spreadBasisPointsIfInactive()).eq(30)
+  })
+
+  it("setSpreadBasisPointsIfChainError", async () => {
+    await expect(fastPriceFeed.connect(user0).setSpreadBasisPointsIfChainError(500))
+      .to.be.revertedWith("Governable: forbidden")
+
+    await fastPriceFeed.setGov(user0.address)
+
+    expect(await fastPriceFeed.spreadBasisPointsIfChainError()).eq(0)
+    await fastPriceFeed.connect(user0).setSpreadBasisPointsIfChainError(500)
+    expect(await fastPriceFeed.spreadBasisPointsIfChainError()).eq(500)
   })
 
   it("setMinBlockInterval", async () => {
@@ -158,21 +214,59 @@ describe("FastPriceFeed", function () {
     await fastPriceFeed.setGov(user0.address)
 
     expect(await fastPriceFeed.isSpreadEnabled()).eq(false)
-    expect(await fastPriceFeed.favorFastPrice()).eq(true)
+    expect(await fastPriceFeed.favorFastPrice(AddressZero)).eq(true)
     await fastPriceFeed.connect(user0).setIsSpreadEnabled(true)
     expect(await fastPriceFeed.isSpreadEnabled()).eq(true)
-    expect(await fastPriceFeed.favorFastPrice()).eq(false)
+    expect(await fastPriceFeed.favorFastPrice(AddressZero)).eq(false)
   })
 
-  it("setMaxTimeDeviation", async () => {
-    await expect(fastPriceFeed.connect(user0).setMaxTimeDeviation(1000))
-      .to.be.revertedWith("Governable: forbidden")
+  it("setTokenManager", async () => {
+    await expect(fastPriceFeed.connect(user0).setTokenManager(user1.address))
+      .to.be.revertedWith("FastPriceFeed: forbidden")
 
-    await fastPriceFeed.setGov(user0.address)
+    expect(await fastPriceFeed.tokenManager()).eq(tokenManager.address)
+    await fastPriceFeed.connect(tokenManager).setTokenManager(user1.address)
+    expect(await fastPriceFeed.tokenManager()).eq(user1.address)
+  })
 
-    expect(await fastPriceFeed.maxTimeDeviation()).eq(0)
-    await fastPriceFeed.connect(user0).setMaxTimeDeviation(1000)
-    expect(await fastPriceFeed.maxTimeDeviation()).eq(1000)
+  it("setMaxDeviationBasisPoints", async () => {
+    await expect(fastPriceFeed.connect(wallet).setMaxDeviationBasisPoints(100))
+      .to.be.revertedWith("FastPriceFeed: forbidden")
+
+    expect(await fastPriceFeed.maxDeviationBasisPoints()).eq(250)
+    await fastPriceFeed.connect(tokenManager).setMaxDeviationBasisPoints(100)
+    expect(await fastPriceFeed.maxDeviationBasisPoints()).eq(100)
+  })
+
+  it("setMaxCumulativeDeltaDiffs", async () => {
+    await expect(fastPriceFeed.connect(wallet).setMaxCumulativeDeltaDiffs([btc.address, eth.address], [300, 500]))
+      .to.be.revertedWith("FastPriceFeed: forbidden")
+
+    expect(await fastPriceFeed.maxCumulativeDeltaDiffs(btc.address)).eq(0)
+    expect(await fastPriceFeed.maxCumulativeDeltaDiffs(eth.address)).eq(0)
+
+    await fastPriceFeed.connect(tokenManager).setMaxCumulativeDeltaDiffs([btc.address, eth.address], [300, 500])
+
+    expect(await fastPriceFeed.maxCumulativeDeltaDiffs(btc.address)).eq(300)
+    expect(await fastPriceFeed.maxCumulativeDeltaDiffs(eth.address)).eq(500)
+  })
+
+  it("setPriceDataInterval", async () => {
+    await expect(fastPriceFeed.connect(wallet).setPriceDataInterval(300))
+      .to.be.revertedWith("FastPriceFeed: forbidden")
+
+    expect(await fastPriceFeed.priceDataInterval()).eq(0)
+    await fastPriceFeed.connect(tokenManager).setPriceDataInterval(300)
+    expect(await fastPriceFeed.priceDataInterval()).eq(300)
+  })
+
+  it("setMinAuthorizations", async () => {
+    await expect(fastPriceFeed.connect(wallet).setMinAuthorizations(3))
+      .to.be.revertedWith("FastPriceFeed: forbidden")
+
+    expect(await fastPriceFeed.minAuthorizations()).eq(2)
+    await fastPriceFeed.connect(tokenManager).setMinAuthorizations(3)
+    expect(await fastPriceFeed.minAuthorizations()).eq(3)
   })
 
   it("setLastUpdatedAt", async () => {
@@ -186,98 +280,32 @@ describe("FastPriceFeed", function () {
     expect(await fastPriceFeed.lastUpdatedAt()).eq(700)
   })
 
-  it("setVolBasisPoints", async () => {
-    await expect(fastPriceFeed.connect(user0).setVolBasisPoints(20))
-      .to.be.revertedWith("Governable: forbidden")
-
-    await fastPriceFeed.setGov(user0.address)
-
-    expect(await fastPriceFeed.volBasisPoints()).eq(0)
-    await fastPriceFeed.connect(user0).setVolBasisPoints(20)
-    expect(await fastPriceFeed.volBasisPoints()).eq(20)
-  })
-
-  it("setMaxDeviationBasisPoints", async () => {
-    await expect(fastPriceFeed.connect(user0).setMaxDeviationBasisPoints(100))
-      .to.be.revertedWith("Governable: forbidden")
-
-    await fastPriceFeed.setGov(user0.address)
-
-    expect(await fastPriceFeed.maxDeviationBasisPoints()).eq(250)
-    await fastPriceFeed.connect(user0).setMaxDeviationBasisPoints(100)
-    expect(await fastPriceFeed.maxDeviationBasisPoints()).eq(100)
-  })
-
-  it("setMinAuthorizations", async () => {
-    await expect(fastPriceFeed.connect(user0).setMinAuthorizations(3))
-      .to.be.revertedWith("FastPriceFeed: forbidden")
-
-    await fastPriceFeed.setTokenManager(user0.address)
-
-    expect(await fastPriceFeed.minAuthorizations()).eq(2)
-    await fastPriceFeed.connect(user0).setMinAuthorizations(3)
-    expect(await fastPriceFeed.minAuthorizations()).eq(3)
-  })
-
-  it("setPrices", async () => {
-    let blockTime = await getBlockTime(provider)
-    await expect(fastPriceFeed.connect(wallet).setPrices([btc.address, eth.address, bnb.address], [expandDecimals(60000, 30), expandDecimals(5000, 30), expandDecimals(700, 30)], blockTime + 100))
-      .to.be.revertedWith("FastPriceFeed: forbidden")
-
-    expect(await fastPriceFeed.lastUpdatedAt()).eq(0)
-    expect(await fastPriceFeed.lastUpdatedBlock()).eq(0)
-
-    await expect(fastPriceFeed.connect(updater0).setPrices([btc.address, eth.address, bnb.address], [expandDecimals(60000, 30), expandDecimals(5000, 30), expandDecimals(700, 30)], blockTime + 100))
-      .to.be.revertedWith("FastPriceFeed: _timestamp exceeds allowed range")
-
-    await fastPriceFeed.setMaxTimeDeviation(200)
-
-    await fastPriceFeed.connect(updater0).setPrices([btc.address, eth.address, bnb.address], [expandDecimals(60000, 30), expandDecimals(5000, 30), expandDecimals(700, 30)], blockTime + 100)
-    const blockNumber0 = await provider.getBlockNumber()
-    expect(await fastPriceFeed.lastUpdatedBlock()).eq(blockNumber0)
-
-    expect(await fastPriceFeed.prices(btc.address)).eq(expandDecimals(60000, 30))
-    expect(await fastPriceFeed.prices(eth.address)).eq(expandDecimals(5000, 30))
-    expect(await fastPriceFeed.prices(bnb.address)).eq(expandDecimals(700, 30))
-
-    expect(await fastPriceFeed.lastUpdatedAt()).eq(blockTime + 100)
-
-    await expect(fastPriceFeed.connect(updater0).setPrices([btc.address, eth.address, bnb.address], [expandDecimals(60000, 30), expandDecimals(5000, 30), expandDecimals(700, 30)], blockTime + 100))
-      .to.be.revertedWith("FastPriceFeed: minBlockInterval not yet passed")
-    const blockNumber1 = await provider.getBlockNumber()
-    expect(blockNumber1 - blockNumber0).eq(1)
-    await mineBlock(provider)
-
-    await fastPriceFeed.connect(updater1).setPrices([btc.address, eth.address, bnb.address], [expandDecimals(60000, 30), expandDecimals(5000, 30), expandDecimals(700, 30)], blockTime + 100)
-    expect(await fastPriceFeed.lastUpdatedBlock()).eq(blockNumber0 + 3)
-  })
-
   it("favorFastPrice", async () => {
     await expect(fastPriceFeed.connect(user0).disableFastPrice())
       .to.be.revertedWith("FastPriceFeed: forbidden")
     await expect(fastPriceFeed.connect(user1).disableFastPrice())
       .to.be.revertedWith("FastPriceFeed: forbidden")
 
-    expect(await fastPriceFeed.favorFastPrice()).eq(true)
+    expect(await fastPriceFeed.favorFastPrice(AddressZero)).eq(true)
     expect(await fastPriceFeed.disableFastPriceVotes(signer0.address)).eq(false)
     expect(await fastPriceFeed.disableFastPriceVoteCount()).eq(0)
 
     await fastPriceFeed.connect(signer0).disableFastPrice()
 
-    expect(await fastPriceFeed.favorFastPrice()).eq(true)
+    expect(await fastPriceFeed.favorFastPrice(AddressZero)).eq(true)
     expect(await fastPriceFeed.disableFastPriceVotes(signer0.address)).eq(true)
     expect(await fastPriceFeed.disableFastPriceVoteCount()).eq(1)
 
     await expect(fastPriceFeed.connect(signer0).disableFastPrice())
       .to.be.revertedWith("FastPriceFeed: already voted")
 
-    expect(await fastPriceFeed.favorFastPrice()).eq(true)
+    expect(await fastPriceFeed.favorFastPrice(AddressZero)).eq(true)
     expect(await fastPriceFeed.disableFastPriceVotes(signer1.address)).eq(false)
     expect(await fastPriceFeed.disableFastPriceVoteCount()).eq(1)
 
     await fastPriceFeed.connect(signer1).disableFastPrice()
 
-    expect(await fastPriceFeed.favorFastPrice()).eq(false)
+    expect(await fastPriceFeed.favorFastPrice(AddressZero)).eq(false)
     expect(await fastPriceFeed.disableFastPriceVotes(signer1.address)).eq(true)
     expect(await fastPriceFeed.disableFastPriceVoteCount()).eq(2)
 
@@ -286,7 +314,7 @@ describe("FastPriceFeed", function () {
 
     await fastPriceFeed.connect(signer1).enableFastPrice()
 
-    expect(await fastPriceFeed.favorFastPrice()).eq(true)
+    expect(await fastPriceFeed.favorFastPrice(AddressZero)).eq(true)
     expect(await fastPriceFeed.disableFastPriceVotes(signer1.address)).eq(false)
     expect(await fastPriceFeed.disableFastPriceVoteCount()).eq(1)
 
@@ -295,390 +323,75 @@ describe("FastPriceFeed", function () {
   })
 
   it("getPrice", async () => {
+    await fastPriceFeed.connect(tokenManager).setPriceDataInterval(1 * 60)
+    await fastPriceFeed.connect(tokenManager).setMaxCumulativeDeltaDiffs([bnb.address], [2000000]) // 20%
+
+    await bnbPriceFeed.setLatestAnswer(800)
+    await btcPriceFeed.setLatestAnswer(80_000)
+    await ethPriceFeed.setLatestAnswer(5000)
+
     let blockTime = await getBlockTime(provider)
-    await fastPriceFeed.setMaxTimeDeviation(1000)
 
     expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(800)
-    await fastPriceFeed.connect(updater0).setPrices([bnb.address], [801], blockTime)
+
+    await mockPyth.setPrice(bnbFeedId, 801, -30, blockTime)
+    await mockPyth.setPrice(btcFeedId, 80_000, -30, blockTime)
+    await mockPyth.setPrice(ethFeedId, 5000, -30, blockTime)
+
+    await fastPriceFeed.connect(updater0).setPricesWithData(["0x"], { value: updateFee })
     expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(801)
 
     await mineBlock(provider)
-    await fastPriceFeed.connect(updater0).setPrices([bnb.address], [900], blockTime)
-    expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(820)
+    await mockPyth.setPrice(bnbFeedId, 900, -30, blockTime)
+    await fastPriceFeed.connect(updater0).setPricesWithData(["0x"], { value: updateFee })
+    expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(900)
     expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(800)
 
     await mineBlock(provider)
-    await fastPriceFeed.connect(updater0).setPrices([bnb.address], [700], blockTime)
+    await mockPyth.setPrice(bnbFeedId, 700, -30, blockTime)
+    await fastPriceFeed.connect(updater0).setPricesWithData(["0x"], { value: updateFee })
     expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(800)
-    expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(780)
+    expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(700)
 
-    await mineBlock(provider)
-    await fastPriceFeed.connect(updater1).setPrices([bnb.address], [900], blockTime)
-
-    await increaseTime(provider, 200)
-    await mineBlock(provider)
-
-    expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(820)
-
-    await increaseTime(provider, 110)
+    await increaseTime(provider, 310)
     await mineBlock(provider)
 
     expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(800)
+    expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(800)
 
-    await mineBlock(provider)
-    await fastPriceFeed.connect(updater1).setPrices([bnb.address], [810], blockTime)
+    expect(await fastPriceFeed.spreadBasisPointsIfInactive()).eq(0)
+    await fastPriceFeed.setSpreadBasisPointsIfInactive(50)
 
-    expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(800)
+    expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(804)
+    expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(796)
 
-    blockTime = blockTime + 500
+    blockTime = await getBlockTime(provider)
+    await mockPyth.setPrice(bnbFeedId, 790, -30, blockTime)
+    await mockPyth.setPrice(btcFeedId, 80_000, -30, blockTime)
+    await mockPyth.setPrice(ethFeedId, 5000, -30, blockTime)
+    await fastPriceFeed.connect(updater1).setPricesWithData(["0x"], { value: updateFee })
 
-    await mineBlock(provider)
-    await fastPriceFeed.connect(updater1).setPrices([bnb.address], [810], blockTime)
+    await fastPriceFeed.setIsSpreadEnabled(false)
 
-    expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(810)
-    expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(810)
-
-    await mineBlock(provider)
-    await fastPriceFeed.connect(updater1).setPrices([bnb.address], [790], blockTime)
     expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(790)
     expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(790)
 
-    await fastPriceFeed.setVolBasisPoints(20)
+    await fastPriceFeed.setIsSpreadEnabled(true)
 
-    await mineBlock(provider)
-    await fastPriceFeed.connect(updater1).setPrices([bnb.address], [810], blockTime)
-    expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(810)
-    expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(808) // 810 * (100 - 0.2)%
-
-    await mineBlock(provider)
-    await fastPriceFeed.connect(updater1).setPrices([bnb.address], [790], blockTime)
-    expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(791) // 790 * (100 + 0.2)%
-    expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(790)
-
-    await fastPriceFeed.connect(signer0).disableFastPrice()
-    await fastPriceFeed.connect(signer1).disableFastPrice()
-
-    await mineBlock(provider)
-    await fastPriceFeed.connect(updater1).setPrices([bnb.address], [810], blockTime)
-    expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(810)
-    expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(800)
-
-    await mineBlock(provider)
-    await fastPriceFeed.connect(updater1).setPrices([bnb.address], [790], blockTime)
     expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(800)
     expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(790)
-  })
 
-  it("setTokens", async () => {
-    const token1 = await deployContract("Token", [])
-    const token2 = await deployContract("Token", [])
+    await fastPriceFeed.setIsSpreadEnabled(false)
 
-    await expect(fastPriceFeed.connect(user0).setTokens([token1.address, token2.address], [100, 1000]))
-      .to.be.revertedWith("Governable: forbidden")
+    expect((await fastPriceFeed.getPriceData(bnb.address))[3]).eq(1285714)
+    expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(790)
+    expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(790)
 
-    await fastPriceFeed.setGov(user0.address)
+    await mockPyth.setPrice(bnbFeedId, 700, -30, blockTime)
+    await fastPriceFeed.connect(updater1).setPricesWithData(["0x"], { value: updateFee })
 
-    await expect(fastPriceFeed.connect(user0).setTokens([token1.address, token2.address], [100]))
-      .to.be.revertedWith("FastPriceFeed: invalid lengths")
-
-    await fastPriceFeed.connect(user0).setTokens([token1.address, token2.address], [100, 1000])
-
-    expect(await fastPriceFeed.tokens(0)).eq(token1.address)
-    expect(await fastPriceFeed.tokens(1)).eq(token2.address)
-    expect(await fastPriceFeed.tokenPrecisions(0)).eq(100)
-    expect(await fastPriceFeed.tokenPrecisions(1)).eq(1000)
-  })
-
-  it("setCompactedPrices", async () => {
-    const price1 = "2009991111"
-    const price2 = "1004445555"
-    const price3 = "123"
-    const price4 = "4567"
-    const price5 = "891011"
-    const price6 = "1213141516"
-    const price7 = "234"
-    const price8 = "5678"
-    const price9 = "910910"
-    const price10 = "10"
-
-    const token1 = await deployContract("Token", [])
-    const token2 = await deployContract("Token", [])
-    const token3 = await deployContract("Token", [])
-    const token4 = await deployContract("Token", [])
-    const token5 = await deployContract("Token", [])
-    const token6 = await deployContract("Token", [])
-    const token7 = await deployContract("Token", [])
-    const token8 = await deployContract("Token", [])
-    const token9 = await deployContract("Token", [])
-    const token10 = await deployContract("Token", [])
-
-    await fastPriceFeed.connect(wallet).setTokens([token1.address, token2.address], [1000, 1000])
-    await fastPriceFeed.setMaxTimeDeviation(1000)
-
-    let priceBitArray = getPriceBitArray([price1, price2])
-    let blockTime = await getBlockTime(provider)
-
-    expect(priceBitArray.length).eq(1)
-
-    await expect(fastPriceFeed.connect(user0).setCompactedPrices(priceBitArray, blockTime))
-      .to.be.revertedWith("FastPriceFeed: forbidden")
-
-    await fastPriceFeed.connect(wallet).setUpdater(user0.address, true)
-
-    expect(await fastPriceFeed.lastUpdatedAt()).eq(0)
-
-    await fastPriceFeed.connect(user0).setCompactedPrices(priceBitArray, blockTime)
-
-    expect(await fastPriceFeed.prices(token1.address)).eq(getExpandedPrice(price1, 1000))
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price2, 1000))
-
-    expect(await fastPriceFeed.lastUpdatedAt()).eq(blockTime)
-
-    await fastPriceFeed.connect(wallet).setTokens([token1.address, token2.address], [1000, 10000])
-
-    blockTime = blockTime + 500
-
-    await fastPriceFeed.connect(user0).setCompactedPrices(priceBitArray, blockTime)
-
-    expect(await fastPriceFeed.prices(token1.address)).eq(getExpandedPrice(price1, 1000))
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price2, 10000))
-
-    expect(await fastPriceFeed.lastUpdatedAt()).eq(blockTime)
-
-    await fastPriceFeed.connect(wallet).setTokens([
-      token1.address, token2.address, token3.address, token4.address,
-      token5.address, token6.address, token7.address],
-      [1000, 100, 10, 1000, 10000, 1000, 1000])
-
-    priceBitArray = getPriceBitArray([
-      price1, price2, price3, price4,
-      price5, price6, price7])
-
-    expect(priceBitArray.length).eq(1)
-
-    await fastPriceFeed.connect(user0).setCompactedPrices(priceBitArray, blockTime)
-
-    const p1 = await fastPriceFeed.prices(token1.address)
-    expect(ethers.utils.formatUnits(p1, 30)).eq("2009991.111")
-    expect(await fastPriceFeed.prices(token1.address)).eq("2009991111000000000000000000000000000")
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price2, 100))
-    expect(await fastPriceFeed.prices(token3.address)).eq(getExpandedPrice(price3, 10))
-    expect(await fastPriceFeed.prices(token4.address)).eq(getExpandedPrice(price4, 1000))
-    expect(await fastPriceFeed.prices(token5.address)).eq(getExpandedPrice(price5, 10000))
-    expect(await fastPriceFeed.prices(token6.address)).eq(getExpandedPrice(price6, 1000))
-    expect(await fastPriceFeed.prices(token7.address)).eq(getExpandedPrice(price7, 1000))
-
-    await fastPriceFeed.connect(wallet).setTokens([
-      token1.address, token2.address, token3.address, token4.address,
-      token5.address, token6.address, token7.address, token8.address],
-      [1000, 100, 10, 1000, 10000, 1000, 1000, 100])
-
-    priceBitArray = getPriceBitArray([
-      price1, price2, price3, price4,
-      price5, price6, price7, price8])
-
-    expect(priceBitArray.length).eq(1)
-
-    await fastPriceFeed.connect(user0).setCompactedPrices(priceBitArray, blockTime)
-
-    expect(await fastPriceFeed.prices(token1.address)).eq(getExpandedPrice(price1, 1000))
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price2, 100))
-    expect(await fastPriceFeed.prices(token3.address)).eq(getExpandedPrice(price3, 10))
-    expect(await fastPriceFeed.prices(token4.address)).eq(getExpandedPrice(price4, 1000))
-    expect(await fastPriceFeed.prices(token5.address)).eq(getExpandedPrice(price5, 10000))
-    expect(await fastPriceFeed.prices(token6.address)).eq(getExpandedPrice(price6, 1000))
-    expect(await fastPriceFeed.prices(token7.address)).eq(getExpandedPrice(price7, 1000))
-    expect(await fastPriceFeed.prices(token8.address)).eq(getExpandedPrice(price8, 100))
-
-    await fastPriceFeed.connect(wallet).setTokens([
-      token1.address, token2.address, token3.address, token4.address,
-      token5.address, token6.address, token7.address, token8.address,
-      token9.address],
-      [1000, 100, 10, 1000, 10000, 1000, 1000, 100, 10])
-
-    priceBitArray = getPriceBitArray([
-      price1, price2, price3, price4,
-      price5, price6, price7, price8,
-      price9])
-
-    expect(priceBitArray.length).eq(2)
-
-    await fastPriceFeed.connect(user0).setCompactedPrices(priceBitArray, blockTime)
-
-    expect(await fastPriceFeed.prices(token1.address)).eq(getExpandedPrice(price1, 1000))
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price2, 100))
-    expect(await fastPriceFeed.prices(token3.address)).eq(getExpandedPrice(price3, 10))
-    expect(await fastPriceFeed.prices(token4.address)).eq(getExpandedPrice(price4, 1000))
-    expect(await fastPriceFeed.prices(token5.address)).eq(getExpandedPrice(price5, 10000))
-    expect(await fastPriceFeed.prices(token6.address)).eq(getExpandedPrice(price6, 1000))
-    expect(await fastPriceFeed.prices(token7.address)).eq(getExpandedPrice(price7, 1000))
-    expect(await fastPriceFeed.prices(token8.address)).eq(getExpandedPrice(price8, 100))
-    expect(await fastPriceFeed.prices(token9.address)).eq(getExpandedPrice(price9, 10))
-
-    await fastPriceFeed.connect(wallet).setTokens([
-      token1.address, token2.address, token3.address, token4.address,
-      token5.address, token6.address, token7.address, token8.address,
-      token9.address, token10.address],
-      [1000, 100, 10, 1000, 10000, 1000, 1000, 100, 10, 10000])
-
-    priceBitArray = getPriceBitArray([
-      price1, price2, price3, price4,
-      price5, price6, price7, price8,
-      price9, price10])
-
-    expect(priceBitArray.length).eq(2)
-
-    await fastPriceFeed.connect(user0).setCompactedPrices(priceBitArray, blockTime)
-
-    expect(await fastPriceFeed.prices(token1.address)).eq(getExpandedPrice(price1, 1000))
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price2, 100))
-    expect(await fastPriceFeed.prices(token3.address)).eq(getExpandedPrice(price3, 10))
-    expect(await fastPriceFeed.prices(token4.address)).eq(getExpandedPrice(price4, 1000))
-    expect(await fastPriceFeed.prices(token5.address)).eq(getExpandedPrice(price5, 10000))
-    expect(await fastPriceFeed.prices(token6.address)).eq(getExpandedPrice(price6, 1000))
-    expect(await fastPriceFeed.prices(token7.address)).eq(getExpandedPrice(price7, 1000))
-    expect(await fastPriceFeed.prices(token8.address)).eq(getExpandedPrice(price8, 100))
-    expect(await fastPriceFeed.prices(token9.address)).eq(getExpandedPrice(price9, 10))
-    expect(await fastPriceFeed.prices(token10.address)).eq(getExpandedPrice(price10, 10000))
-  })
-
-  it("setPricesWithBits", async () => {
-    const price1 = "2009991111"
-    const price2 = "1004445555"
-    const price3 = "123"
-    const price4 = "4567"
-    const price5 = "891011"
-    const price6 = "1213141516"
-    const price7 = "234"
-    const price8 = "5678"
-    const price9 = "910910"
-    const price10 = "10"
-
-    const token1 = await deployContract("Token", [])
-    const token2 = await deployContract("Token", [])
-    const token3 = await deployContract("Token", [])
-    const token4 = await deployContract("Token", [])
-    const token5 = await deployContract("Token", [])
-    const token6 = await deployContract("Token", [])
-    const token7 = await deployContract("Token", [])
-    const token8 = await deployContract("Token", [])
-    const token9 = await deployContract("Token", [])
-    const token10 = await deployContract("Token", [])
-
-    await fastPriceFeed.connect(wallet).setTokens([token1.address, token2.address], [1000, 1000])
-    await fastPriceFeed.setMaxTimeDeviation(1000)
-
-    let priceBits = getPriceBits([price1, price2])
-    let blockTime = await getBlockTime(provider)
-
-    await expect(fastPriceFeed.connect(user0).setPricesWithBits(priceBits, blockTime))
-      .to.be.revertedWith("FastPriceFeed: forbidden")
-
-    await fastPriceFeed.connect(wallet).setUpdater(user0.address, true)
-
-    expect(await fastPriceFeed.lastUpdatedAt()).eq(0)
-
-    await fastPriceFeed.connect(user0).setPricesWithBits(priceBits, blockTime)
-
-    expect(await fastPriceFeed.prices(token1.address)).eq(getExpandedPrice(price1, 1000))
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price2, 1000))
-
-    expect(await fastPriceFeed.lastUpdatedAt()).eq(blockTime)
-
-    await fastPriceFeed.connect(wallet).setTokens([token1.address, token2.address], [1000, 10000])
-
-    blockTime = blockTime + 500
-
-    await fastPriceFeed.connect(user0).setPricesWithBits(priceBits, blockTime)
-
-    expect(await fastPriceFeed.prices(token1.address)).eq(getExpandedPrice(price1, 1000))
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price2, 10000))
-
-    expect(await fastPriceFeed.lastUpdatedAt()).eq(blockTime)
-
-    await fastPriceFeed.connect(wallet).setTokens([
-      token1.address, token2.address, token3.address, token4.address,
-      token5.address, token6.address, token7.address],
-      [1000, 100, 10, 1000, 10000, 1000, 1000])
-
-    priceBits = getPriceBits([
-      price1, price2, price3, price4,
-      price5, price6, price7])
-
-    await fastPriceFeed.connect(user0).setPricesWithBits(priceBits, blockTime)
-
-    const p1 = await fastPriceFeed.prices(token1.address)
-    expect(ethers.utils.formatUnits(p1, 30)).eq("2009991.111")
-    expect(await fastPriceFeed.prices(token1.address)).eq("2009991111000000000000000000000000000")
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price2, 100))
-    expect(await fastPriceFeed.prices(token3.address)).eq(getExpandedPrice(price3, 10))
-    expect(await fastPriceFeed.prices(token4.address)).eq(getExpandedPrice(price4, 1000))
-    expect(await fastPriceFeed.prices(token5.address)).eq(getExpandedPrice(price5, 10000))
-    expect(await fastPriceFeed.prices(token6.address)).eq(getExpandedPrice(price6, 1000))
-    expect(await fastPriceFeed.prices(token7.address)).eq(getExpandedPrice(price7, 1000))
-
-    await fastPriceFeed.connect(wallet).setTokens([
-      token1.address, token2.address, token3.address, token4.address,
-      token5.address, token6.address, token7.address, token8.address],
-      [1000, 100, 10, 1000, 10000, 1000, 1000, 100])
-
-    priceBits = getPriceBits([
-      price1, price2, price3, price4,
-      price5, price6, price7, price8])
-
-    await fastPriceFeed.connect(user0).setPricesWithBits(priceBits, blockTime)
-
-    expect(await fastPriceFeed.prices(token1.address)).eq(getExpandedPrice(price1, 1000))
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price2, 100))
-    expect(await fastPriceFeed.prices(token3.address)).eq(getExpandedPrice(price3, 10))
-    expect(await fastPriceFeed.prices(token4.address)).eq(getExpandedPrice(price4, 1000))
-    expect(await fastPriceFeed.prices(token5.address)).eq(getExpandedPrice(price5, 10000))
-    expect(await fastPriceFeed.prices(token6.address)).eq(getExpandedPrice(price6, 1000))
-    expect(await fastPriceFeed.prices(token7.address)).eq(getExpandedPrice(price7, 1000))
-    expect(await fastPriceFeed.prices(token8.address)).eq(getExpandedPrice(price8, 100))
-
-    priceBits = getPriceBits([
-      price1, price2, price3, price4,
-      price5, price6, price7, price9])
-
-    await mineBlock(provider)
-    await fastPriceFeed.connect(user0).setPricesWithBits(priceBits, blockTime)
-
-    expect(await fastPriceFeed.prices(token1.address)).eq(getExpandedPrice(price1, 1000))
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price2, 100))
-    expect(await fastPriceFeed.prices(token3.address)).eq(getExpandedPrice(price3, 10))
-    expect(await fastPriceFeed.prices(token4.address)).eq(getExpandedPrice(price4, 1000))
-    expect(await fastPriceFeed.prices(token5.address)).eq(getExpandedPrice(price5, 10000))
-    expect(await fastPriceFeed.prices(token6.address)).eq(getExpandedPrice(price6, 1000))
-    expect(await fastPriceFeed.prices(token7.address)).eq(getExpandedPrice(price7, 1000))
-    expect(await fastPriceFeed.prices(token8.address)).eq(getExpandedPrice(price9, 100))
-
-    priceBits = getPriceBits([
-      price7, price1, price3, price4,
-      price5, price6, price7, price8])
-
-    await mineBlock(provider)
-    await fastPriceFeed.connect(user0).setPricesWithBits(priceBits, blockTime - 1)
-
-    expect(await fastPriceFeed.prices(token1.address)).eq(getExpandedPrice(price1, 1000))
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price2, 100))
-    expect(await fastPriceFeed.prices(token3.address)).eq(getExpandedPrice(price3, 10))
-    expect(await fastPriceFeed.prices(token4.address)).eq(getExpandedPrice(price4, 1000))
-    expect(await fastPriceFeed.prices(token5.address)).eq(getExpandedPrice(price5, 10000))
-    expect(await fastPriceFeed.prices(token6.address)).eq(getExpandedPrice(price6, 1000))
-    expect(await fastPriceFeed.prices(token7.address)).eq(getExpandedPrice(price7, 1000))
-    expect(await fastPriceFeed.prices(token8.address)).eq(getExpandedPrice(price9, 100))
-
-    await mineBlock(provider)
-    await fastPriceFeed.connect(user0).setPricesWithBits(priceBits, blockTime + 1)
-
-    expect(await fastPriceFeed.prices(token1.address)).eq(getExpandedPrice(price7, 1000))
-    expect(await fastPriceFeed.prices(token2.address)).eq(getExpandedPrice(price1, 100))
-    expect(await fastPriceFeed.prices(token3.address)).eq(getExpandedPrice(price3, 10))
-    expect(await fastPriceFeed.prices(token4.address)).eq(getExpandedPrice(price4, 1000))
-    expect(await fastPriceFeed.prices(token5.address)).eq(getExpandedPrice(price5, 10000))
-    expect(await fastPriceFeed.prices(token6.address)).eq(getExpandedPrice(price6, 1000))
-    expect(await fastPriceFeed.prices(token7.address)).eq(getExpandedPrice(price7, 1000))
-    expect(await fastPriceFeed.prices(token8.address)).eq(getExpandedPrice(price8, 100))
+    expect((await fastPriceFeed.getPriceData(bnb.address))[3]).eq(2424954)
+    expect(await fastPriceFeed.getPrice(bnb.address, 800, true)).eq(800)
+    expect(await fastPriceFeed.getPrice(bnb.address, 800, false)).eq(700)
   })
 })

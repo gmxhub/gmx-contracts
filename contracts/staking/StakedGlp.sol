@@ -62,12 +62,17 @@ contract StakedGlp {
         return true;
     }
 
+    // note that since this returns the depositBalance in feeGlpTracker
+    // actions such as depositing into the GlpVester would not change the
+    // balanceOf value for an account
+    // IRewardTracker(stakedGlpTracker).balanceOf(_account) may be more appropriate
+    // depending on the usage
     function balanceOf(address _account) external view returns (uint256) {
-        IRewardTracker(stakedGlpTracker).depositBalances(_account, glp);
+        return IRewardTracker(feeGlpTracker).depositBalances(_account, glp);
     }
 
     function totalSupply() external view returns (uint256) {
-        IERC20(stakedGlpTracker).totalSupply();
+        return IERC20(stakedGlpTracker).totalSupply();
     }
 
     function _approve(address _owner, address _spender, uint256 _amount) private {
