@@ -1,48 +1,48 @@
-const { getFrameSigner, deployContract, contractAt, sendTxn, readTmpAddresses, callWithRetries } = require("../shared/helpers")
+const { deployContract, contractAt, sendTxn, readTmpAddresses, callWithRetries } = require("../shared/helpers")
 const { bigNumberify, expandDecimals } = require("../../test/shared/utilities")
 const { toChainlinkPrice } = require("../../test/shared/chainlink")
 
 const network = (process.env.HARDHAT_NETWORK || 'mainnet');
 const tokens = require('./tokens')[network];
 
-async function getArbValues(signer) {
+async function getArbValues() {
   const vault = await contractAt("Vault", "0x489ee077994B6658eAfA855C308275EAd8097C4A")
-  const timelock = await contractAt("Timelock", await vault.gov(), signer)
+  const timelock = await contractAt("Timelock", await vault.gov())
   const reader = await contractAt("Reader", "0x2b43c90D1B727cEe1Df34925bcd5Ace52Ec37694")
 
   const { btc, eth, usdc, link, uni, usdt, mim, frax, dai } = tokens
-  const tokenArr = [usdt]
+  const tokenArr = [ btc, eth, usdc, link, uni, usdt, frax, dai ]
 
   const vaultTokenInfo = await reader.getVaultTokenInfoV2(vault.address, eth.address, 1, tokenArr.map(t => t.address))
 
   return { vault, timelock, reader, tokenArr, vaultTokenInfo }
 }
 
-async function getAvaxValues(signer) {
+async function getAvaxValues() {
   const vault = await contractAt("Vault", "0x9ab2De34A33fB459b538c43f251eB825645e8595")
-  const timelock = await contractAt("Timelock", await vault.gov(), signer)
+  const timelock = await contractAt("Timelock", await vault.gov())
   const reader = await contractAt("Reader", "0x2eFEE1950ededC65De687b40Fd30a7B5f4544aBd")
 
-  const { avax, eth, btc, mim, usdce, usdc } = tokens
-  const tokenArr = [avax]
+  const { avax, eth, btcb, btc, usdc, usdce } = tokens
+  const tokenArr = [ avax, eth, btcb, btc, usdc, usdce ]
 
   const vaultTokenInfo = await reader.getVaultTokenInfoV2(vault.address, avax.address, 1, tokenArr.map(t => t.address))
 
   return { vault, timelock, reader, tokenArr, vaultTokenInfo }
 }
 
-async function main() {
-  const signer = await getFrameSigner()
-
-  let vault, timelock, reader, tokenArr, vaultTokenInfo
-
+async function getValues() {
   if (network === "arbitrum") {
-    ;({ vault, timelock, reader, tokenArr, vaultTokenInfo }  = await getArbValues(signer));
+    return getArbValues()
   }
 
   if (network === "avax") {
-    ;({ vault, timelock, reader, tokenArr, vaultTokenInfo }  = await getAvaxValues(signer));
+    return getAvaxValues()
   }
+}
+
+async function main() {
+  const { vault, timelock, reader, tokenArr, vaultTokenInfo } = await getValues()
 
   console.log("vault", vault.address)
   console.log("timelock", timelock.address)
@@ -82,8 +82,14 @@ async function main() {
       .mul(expandDecimals(1, tokenItem.decimals))
       .div(token.minPrice);
 
-    const usdgAmount = token.managedUsd.div(expandDecimals(1, 30 - 18))
+    let usdgAmount = token.managedUsd.div(expandDecimals(1, 30 - 18))
     totalUsdgAmount = totalUsdgAmount.add(usdgAmount)
+
+    const adjustedMaxUsdgAmount = expandDecimals(tokenItem.maxUsdgAmount, 18)
+    if (usdgAmount.gt(adjustedMaxUsdgAmount)) {
+      console.warn(`usdgAmount for ${tokenItem.name} was adjusted from ${usdgAmount.toString()} to ${adjustedMaxUsdgAmount.toString()}`)
+      usdgAmount = adjustedMaxUsdgAmount
+    }
 
     if (shouldSendTxn) {
       await sendTxn(timelock.setTokenConfig(
